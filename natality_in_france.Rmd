@@ -1,0 +1,214 @@
+---
+title: "Forecast births in France"
+output: html_notebook
+---
+# Preparation of the data
+We clean the environnment.
+```{r}
+rm(list = ls())
+```
+
+
+* **The libraries that we will need.**
+```{r}
+library(tidyverse)
+library(forecast)
+```
+
+We prepare the data
+```{r}
+mydata = read.csv("valeurs_mensuelles.csv", header=TRUE, sep=";", col.names = c("period","Births","codes"))
+mydata = mydata[c(-1,-2),] # We exclude the first two rows.
+rownames(mydata) = NULL # To exclude the rows numbers.
+mydata = mydata %>% arrange(-row_number()) # We reverse the order of the rows
+head(mydata, n=1) # start 1946-01
+tail(mydata, n=1) # end 2018-12
+dim(mydata)[1] # 876 observations
+mydata = mydata %>% select(Births) # We only keep the column that we are interested in.
+```
+
+We transform the data to a time series.
+```{r}
+birth_ts = ts(mydata,start = c(1946, 1), end=c(2018,12), frequency = 12)
+#birth_ts = window(birth_ts, start=c(2009,01)) # if we want to restrict last 10 years
+```
+
+# Plot
+We plot the time series.
+
+```{r}
+plot(birth_ts, main="Number of births in France")
+```
+We see a downward trend with some bumps in the number of births. It is difficult to see if there is seasonality.
+
+```{r}
+monthplot(diff(birth_ts, lag=1), main = "Monthly plot of Births", ylab="Difference in births")
+```
+When we remove the trend, it is clear that there is seasonality.  We should go in seasonal differences.
+
+
+Let's try to create a stationary time series
+```{r}
+birth_ts_s= diff(diff(birth_ts, lag=12),lag=1) # _s for stationary
+plot(birth_ts_s, main="Time Series stationary")
+```
+It seems that we have remove the trend and the seasonality. The variance does not seem to increase, we have no reason to go in log. We can now rely on the concept of stationarity.
+
+Visual proof of no more seasonality
+```{r}
+monthplot(birth_ts_s, main="Proof no seasonality")
+```
+All the months have the same mean.
+
+Is ts_s white noise ? We check:
+```{r}
+Box.test(birth_ts_s, lag=20, type="Ljung-Box")
+```
+We can strongly reject than birth_ts_s is a white noise.
+In our models, we will go in differences and in seasonal differences.
+
+
+# Modelling
+
+Correlogram of the series
+```{r}
+acf(birth_ts_s, main="Correlogram")
+```
+The Correlogram indicates that a Moving average MA(4) repeated once or twice could be appropriate.
+
+Partial Correlogram
+```{r}
+pacf(birth_ts_s, main= "Partial Correlogram")
+```
+It indicates that a AR(6) repeated once or twice could be appropriate.
+
+Let's try different models to remove the autocorrelation
+* **auto_arima: ARIMA(3,0,1)(2,1,2)**
+```{r}
+model_auto = auto.arima(birth_ts)
+summary(model_auto)
+Box.test(model_auto$res, lag=10, type="Ljung-Box")
+```
+```{r}
+acf(model_auto$res, main="Residual Correlogram")
+```
+We can reject that the residuals are white noise. We reject this model.
+
+* **AR(6) repeated once**
+```{r}
+model1 = arima(birth_ts, order=c(6, 1, 0), seasonal=c(2,1,0))
+summary(model1)
+Box.test(model1$res, lag=10, type="Ljung-Box")
+```
+
+```{r}
+acf(model1$res, main="Residual Correlogram")
+```
+
+**Our model is validated. Our residuals are white noise.**
+
+* **MA(4) repeated once.**
+```{r}
+model2 = arima(birth_ts, order=c(0, 1, 4), seasonal=c(0,1,1))
+summary(model2)
+Box.test(model2$res, lag=10, type="Ljung-Box")
+```
+
+```{r}
+acf(model2$res, main="Residual Correlogram")
+```
+**Our model is validated. Our residuals are white noise.**
+
+* **ARMA(2,2) repeated twice.**
+```{r}
+model3 = arima(birth_ts, order=c(2, 1, 2), seasonal=c(1,1,1))
+summary(model3)
+Box.test(model3$res, lag=10, type="Ljung-Box")
+```
+
+```{r}
+acf(model3$res, main="Residual Correlogram")
+```
+
+
+## Comparison models
+
+# In-Sample Comparison
+The BIC penalizes even more for the complexity of the model.
+This is the more popular criterion in time series analysis.
+```{r}
+BIC(model1)
+BIC(model2)
+BIC(model3)
+```
+
+#Out-of-sample Comparison
+We compare the two models with the lowest BIC (model 3 and model 2)
+
+We generate out-of-sample forecast errors for ARMA(2,2) (model3):
+```{r}
+y<-birth_ts
+S=round(length(y)/2);h=4;
+
+error1.h<-c()
+for (i in S:(length(y)-h)) {
+mymodel.sub<-arima(y[1:i],order=c(2, 1, 2), seasonal=c(1,1,1))
+predict.h<-predict(mymodel.sub,n.ahead=h)$pred[h]
+error1.h<-c(error1.h,y[i+h]-predict.h)
+}
+
+MAE3<-mean(abs(error1.h))
+MAPE1<-mean(abs(error1.h)/length(error1.h))
+```
+We generate out-of-sample forecast errors for MA(4) (model 2): 
+```{r}
+error2.h<-c()
+for (i in S:(length(y)-h)) {
+mymodel.sub<-arima(y[1:i],order=c(0, 1, 4), seasonal=c(0,1,1))
+predict.h<-predict(mymodel.sub,n.ahead=h)$pred[h]
+error2.h<-c(error1.h,y[i+h]-predict.h)
+}
+
+MAE2<-mean(abs(error2.h))
+MAPE2<-mean(abs(error2.h)/length(error2.h))
+
+```
+
+We compute a Diebold Mariano test to assess the significance of the difference in MAE and MAPE between our 2 models. 
+
+```{r}
+dm.test(error1.h,error2.h,h=h,power=1)
+```
+
+We conclude that the forecast performance of the two models, measured by the MAE, is not significantly different.
+
+Thus, we stick to the BIC criteria and chose model 3. 
+
+
+# Forecast with the best model. (or with average equal model ?)
+```{r}
+myforecast = predict(model3,n.ahead=4)
+alpha = 0.05
+q=qnorm(1-alpha/2)
+prediction = myforecast$pred
+lower = prediction - q*myforecast$se # lower bound CI
+upper = prediction + q*myforecast$se # upper bound CI
+cbind(lower, prediction, upper) # probability 95%
+```
+
+```{r}
+plot(birth_ts, main="Forecast", xlim=c(2018,2020), ylim=c(50000, 75000))
+lines(prediction,col="red")
+lines(lower,col="blue")
+lines(upper,col="blue")
+```
+
+
+
+
+
+
+
+
+
+
